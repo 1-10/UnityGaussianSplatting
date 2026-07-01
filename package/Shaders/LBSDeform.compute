@@ -11,6 +11,9 @@
 #pragma kernel CSApplyLBS
 
 #include "GaussianSplatting.hlsl"
+// The include above declares (in RWByteAddressBuffer/StructuredBuffer form):
+//   _SplatPos (RW), _SplatFormat, _SplatChunks, _SplatChunkCount, kChunkSize,
+//   SplatChunkInfo, LoadSplatPosValue(), EncodePacked_11_10_11()
 
 // Number of bones driving the LBS deformation: root, neck, jaw, leftEye, rightEye
 #define LBS_BONE_COUNT 5
@@ -20,20 +23,24 @@ StructuredBuffer<float> _BoneWeights; // _SplatCount * LBS_BONE_COUNT, row-major
 StructuredBuffer<float4x4> _BoneMatrices; // LBS_BONE_COUNT object-space bone matrices
 
 // Decodes the raw (un-chunked) 0..1 splat position value, along with the
-// chunk bounds it should be de-normalized/re-normalized against.
-float3 LoadSplatPosRawAndBounds(uint idx, out float3 posMin, out float3 posMax)
+// chunk bounds it should be de-normalized/re-normalized against. Returns
+// false if the splat has no associated chunk (compressed formats always
+// require chunk data, so this indicates there is nothing valid to decode).
+bool LoadSplatPosRawAndBounds(uint idx, out float3 pos, out float3 posMin, out float3 posMax)
 {
-    float3 raw = LoadSplatPosValue(idx);
-    posMin = float3(0, 0, 0);
-    posMax = float3(1, 1, 1);
     uint chunkIdx = idx / kChunkSize;
-    if (chunkIdx < _SplatChunkCount)
+    if (chunkIdx >= _SplatChunkCount)
     {
-        SplatChunkInfo chunk = _SplatChunks[chunkIdx];
-        posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
-        posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+        pos = posMin = posMax = float3(0, 0, 0);
+        return false;
     }
-    return lerp(posMin, posMax, raw);
+
+    float3 raw = LoadSplatPosValue(idx);
+    SplatChunkInfo chunk = _SplatChunks[chunkIdx];
+    posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+    posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+    pos = lerp(posMin, posMax, raw);
+    return true;
 }
 
 [numthreads(GROUP_SIZE,1,1)]
@@ -48,8 +55,9 @@ void CSApplyLBS (uint3 id : SV_DispatchThreadID)
     if (fmt != VECTOR_FMT_11)
         return;
 
-    float3 posMin, posMax;
-    float3 pos = LoadSplatPosRawAndBounds(idx, posMin, posMax);
+    float3 pos, posMin, posMax;
+    if (!LoadSplatPosRawAndBounds(idx, pos, posMin, posMax))
+        return;
 
     // Linear blend skinning: blend the bone matrices by the per-splat weights,
     // then transform the (canonical pose) position by the blended matrix.

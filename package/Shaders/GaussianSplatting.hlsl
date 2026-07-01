@@ -283,12 +283,15 @@ half3 DecodePacked_11_10_11(uint enc)
 }
 
 // Inverse of DecodePacked_11_10_11: packs a 0..1 range float3 into 11.10.11 bits
+#define PACK_11_10_11_X_MAX 2047 // 2^11 - 1
+#define PACK_11_10_11_Y_MAX 1023 // 2^10 - 1
+#define PACK_11_10_11_Z_MAX 2047 // 2^11 - 1
 uint EncodePacked_11_10_11(float3 v)
 {
     v = saturate(v);
-    uint x = (uint)round(v.x * 2047.0);
-    uint y = (uint)round(v.y * 1023.0);
-    uint z = (uint)round(v.z * 2047.0);
+    uint x = (uint)round(v.x * PACK_11_10_11_X_MAX);
+    uint y = (uint)round(v.y * PACK_11_10_11_Y_MAX);
+    uint z = (uint)round(v.z * PACK_11_10_11_Z_MAX);
     return x | (y << 11) | (z << 21);
 }
 

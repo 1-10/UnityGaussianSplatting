@@ -45,6 +45,7 @@ namespace GaussianSplatting.Runtime
         GraphicsBuffer m_GpuBoneMatrices;
         int m_KernelIndex = -1;
         int m_WeightSplatCount;
+        readonly float4x4[] m_BoneMatricesScratch = new float4x4[kBoneCount];
 
         static class Props
         {
@@ -122,7 +123,7 @@ namespace GaussianSplatting.Runtime
                 return;
             }
 
-            m_GpuBoneWeights = new GraphicsBuffer(GraphicsBuffer.Target.Structured, expected, sizeof(float))
+            m_GpuBoneWeights = new GraphicsBuffer(GraphicsBuffer.Target.Structured, expected, UnsafeUtility.SizeOf<float>())
                 { name = "GaussianSplatLBSBoneWeights" };
             m_GpuBoneWeights.SetData(json.weights);
             m_WeightSplatCount = m_Splat.splatCount;
@@ -156,7 +157,7 @@ namespace GaussianSplatting.Runtime
             if (!HasValidSetup)
                 return;
 
-            var matrices = new float4x4[kBoneCount];
+            var matrices = m_BoneMatricesScratch;
             BuildBoneMatrices(matrices);
             m_GpuBoneMatrices.SetData(matrices);
 
@@ -171,7 +172,8 @@ namespace GaussianSplatting.Runtime
             cs.SetBuffer(m_KernelIndex, Props.BoneMatrices, m_GpuBoneMatrices);
 
             cs.GetKernelThreadGroupSizes(m_KernelIndex, out uint gsX, out _, out _);
-            int groups = (m_Splat.splatCount + (int)gsX - 1) / (int)gsX;
+            int groupSize = (int)gsX;
+            int groups = (m_Splat.splatCount + groupSize - 1) / groupSize;
             cs.Dispatch(m_KernelIndex, groups, 1, 1);
         }
     }

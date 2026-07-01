@@ -1,0 +1,62 @@
+// SPDX-License-Identifier: MIT
+// Linear Blend Skinning (LBS) of Gaussian splat positions, driven by per-bone
+// transform matrices (e.g. computed from a FLAME jaw_pose axis-angle value).
+#define GROUP_SIZE 1024
+
+#pragma kernel CSApplyLBS
+
+#include "GaussianSplatting.hlsl"
+
+// Flattened per-splat per-bone weights: _LBSWeights[idx * _BoneCount + bone]
+StructuredBuffer<float> _LBSWeights;
+// One 4x4 transform matrix per bone (object space)
+StructuredBuffer<float4x4> _BoneMatrices;
+uint _BoneCount;
+uint _SplatCount;
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSApplyLBS (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    float3 pos = LoadSplatPos(idx);
+
+    float3 skinnedPos = 0;
+    float weightSum = 0;
+    for (uint b = 0; b < _BoneCount; b++)
+    {
+        float w = _LBSWeights[idx * _BoneCount + b];
+        if (w <= 0)
+            continue;
+        float3 p = mul(_BoneMatrices[b], float4(pos, 1)).xyz;
+        skinnedPos += p * w;
+        weightSum += w;
+    }
+
+    if (weightSum > 1.0e-6)
+        skinnedPos /= weightSum;
+    else
+        skinnedPos = pos;
+
+    uint fmt = _SplatFormat & 0xFF;
+    if (fmt == VECTOR_FMT_11)
+    {
+        float3 posN = skinnedPos;
+        uint chunkIdx = idx / kChunkSize;
+        if (chunkIdx < _SplatChunkCount)
+        {
+            SplatChunkInfo chunk = _SplatChunks[chunkIdx];
+            float3 posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+            float3 posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+            posN = saturate((skinnedPos - posMin) / max(posMax - posMin, 1.0e-9));
+        }
+        uint enc = EncodePacked_11_10_11(posN);
+        _SplatPos.Store(idx * 4, enc);
+    }
+    else if (fmt == VECTOR_FMT_32F && _SplatChunkCount == 0)
+    {
+        _SplatPos.Store3(idx * 12, asuint(skinnedPos));
+    }
+}

@@ -282,6 +282,16 @@ half3 DecodePacked_11_10_11(uint enc)
         ((enc >> 21) & 2047) / 2047.0);
 }
 
+// Inverse of DecodePacked_11_10_11: packs a 0..1 range float3 into 11.10.11 bits
+uint EncodePacked_11_10_11(float3 v)
+{
+    v = saturate(v);
+    uint x = (uint)round(v.x * 2047.0);
+    uint y = (uint)round(v.y * 1023.0);
+    uint z = (uint)round(v.z * 2047.0);
+    return x | (y << 11) | (z << 21);
+}
+
 float3 DecodePacked_16_16_16(uint2 enc)
 {
     return float3(

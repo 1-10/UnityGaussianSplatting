@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: 18ac62f38c894dd691e9d8422127cb81
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - m_CSLBSDeform: {fileID: 7200000, guid: 9b90a5ee36bc4f4396d0eccc4bc078f9, type: 3}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant:

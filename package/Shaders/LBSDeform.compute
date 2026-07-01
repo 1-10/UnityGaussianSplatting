@@ -1,0 +1,71 @@
+// SPDX-License-Identifier: MIT
+// Linear Blend Skinning (LBS) compute shader that deforms Gaussian Splat
+// positions based on per-splat bone weights and per-bone transform matrices
+// (e.g. driven by FLAME's jaw_pose for mouth animation).
+//
+// Only the Norm11 (11.10.11) splat position format is supported, matching
+// the default GaussianSplatAsset.VectorFormat.Norm11 used by cano_gs.ply
+// assets exported for this project.
+#define GROUP_SIZE 1024
+
+#pragma kernel CSApplyLBS
+
+#include "GaussianSplatting.hlsl"
+
+// Number of bones driving the LBS deformation: root, neck, jaw, leftEye, rightEye
+#define LBS_BONE_COUNT 5
+
+uint _SplatCount;
+StructuredBuffer<float> _BoneWeights; // _SplatCount * LBS_BONE_COUNT, row-major per splat
+StructuredBuffer<float4x4> _BoneMatrices; // LBS_BONE_COUNT object-space bone matrices
+
+// Decodes the raw (un-chunked) 0..1 splat position value, along with the
+// chunk bounds it should be de-normalized/re-normalized against.
+float3 LoadSplatPosRawAndBounds(uint idx, out float3 posMin, out float3 posMax)
+{
+    float3 raw = LoadSplatPosValue(idx);
+    posMin = float3(0, 0, 0);
+    posMax = float3(1, 1, 1);
+    uint chunkIdx = idx / kChunkSize;
+    if (chunkIdx < _SplatChunkCount)
+    {
+        SplatChunkInfo chunk = _SplatChunks[chunkIdx];
+        posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+        posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+    }
+    return lerp(posMin, posMax, raw);
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSApplyLBS (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    // This kernel only knows how to write back Norm11-encoded positions.
+    uint fmt = _SplatFormat & 0xFF;
+    if (fmt != VECTOR_FMT_11)
+        return;
+
+    float3 posMin, posMax;
+    float3 pos = LoadSplatPosRawAndBounds(idx, posMin, posMax);
+
+    // Linear blend skinning: blend the bone matrices by the per-splat weights,
+    // then transform the (canonical pose) position by the blended matrix.
+    float4x4 blended = (float4x4)0;
+    [unroll]
+    for (uint bone = 0; bone < LBS_BONE_COUNT; bone++)
+    {
+        float w = _BoneWeights[idx * LBS_BONE_COUNT + bone];
+        blended += w * _BoneMatrices[bone];
+    }
+
+    float3 newPos = mul(blended, float4(pos, 1)).xyz;
+
+    float3 range = max(posMax - posMin, 1e-9);
+    float3 norm = saturate((newPos - posMin) / range);
+
+    uint enc = EncodePacked_11_10_11(norm);
+    _SplatPos.Store(idx * 4, enc);
+}

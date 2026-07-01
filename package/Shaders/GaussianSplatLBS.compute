@@ -38,7 +38,7 @@ void CSApplyLBS (uint3 id : SV_DispatchThreadID)
     if (weightSum > 1.0e-6)
         skinnedPos /= weightSum;
     else
-        skinnedPos = pos;
+        skinnedPos = pos; // no (or negligible) bone influence: fall back to the original position
 
     uint fmt = _SplatFormat & 0xFF;
     if (fmt == VECTOR_FMT_11)

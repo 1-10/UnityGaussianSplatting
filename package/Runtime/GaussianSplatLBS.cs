@@ -133,6 +133,8 @@ namespace GaussianSplatting.Runtime
             if (m_Renderer.splatCount != m_WeightPointCount)
                 return;
 
+            // The Inspector slider rotates the jaw around the x axis, so the axis-angle vector's
+            // magnitude is m_JawAngle and its direction is (1,0,0).
             float3 jawAxisAngle = m_JawPoseSetExternally ? m_JawPose : new float3(m_JawAngle, 0, 0);
             UpdateBoneMatrices(jawAxisAngle);
             DispatchLBS();

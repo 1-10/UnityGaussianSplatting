@@ -17,6 +17,8 @@
 
 // Number of bones driving the LBS deformation: root, neck, jaw, leftEye, rightEye
 #define LBS_BONE_COUNT 5
+// Guards against division by zero when a chunk has zero-sized bounds on an axis
+#define MIN_RANGE_EPSILON 1e-9
 
 uint _SplatCount;
 StructuredBuffer<float> _BoneWeights; // _SplatCount * LBS_BONE_COUNT, row-major per splat
@@ -71,7 +73,7 @@ void CSApplyLBS (uint3 id : SV_DispatchThreadID)
 
     float3 newPos = mul(blended, float4(pos, 1)).xyz;
 
-    float3 range = max(posMax - posMin, 1e-9);
+    float3 range = max(posMax - posMin, MIN_RANGE_EPSILON);
     float3 norm = saturate((newPos - posMin) / range);
 
     uint enc = EncodePacked_11_10_11(norm);

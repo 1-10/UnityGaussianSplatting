@@ -12,8 +12,9 @@
 
 #include "GaussianSplatting.hlsl"
 // The include above declares (in RWByteAddressBuffer/StructuredBuffer form):
-//   _SplatPos (RW), _SplatFormat, _SplatChunks, _SplatChunkCount, kChunkSize,
-//   SplatChunkInfo, LoadSplatPosValue(), EncodePacked_11_10_11()
+//   _SplatPos (RW, write-only here), _SplatFormat, _SplatChunks,
+//   _SplatChunkCount, kChunkSize, SplatChunkInfo, DecodePacked_11_10_11(),
+//   EncodePacked_11_10_11()
 
 // Number of bones driving the LBS deformation: root, neck, jaw, leftEye, rightEye
 #define LBS_BONE_COUNT 5
@@ -23,6 +24,12 @@
 uint _SplatCount;
 StructuredBuffer<float> _BoneWeights; // _SplatCount * LBS_BONE_COUNT, row-major per splat
 StructuredBuffer<float4x4> _BoneMatrices; // LBS_BONE_COUNT object-space bone matrices
+
+// Read-only copy of the canonical (un-deformed) splat positions, captured
+// once at initialization time. Every dispatch re-reads from this buffer and
+// writes the deformed result into _SplatPos, so results never accumulate
+// across frames (unlike reading and writing the same live _SplatPos buffer).
+ByteAddressBuffer _SplatPosCanonical;
 
 // Decodes the raw (un-chunked) 0..1 splat position value, along with the
 // chunk bounds it should be de-normalized/re-normalized against. Returns
@@ -37,7 +44,11 @@ bool LoadSplatPosRawAndBounds(uint idx, out float3 pos, out float3 posMin, out f
         return false;
     }
 
-    float3 raw = LoadSplatPosValue(idx);
+    // Only Norm11 (VECTOR_FMT_11) is supported by this kernel, which is a
+    // straightforward 4-byte-per-splat raw uint, so we can read it directly
+    // from the canonical buffer rather than the live _SplatPos buffer.
+    uint enc = _SplatPosCanonical.Load(idx * 4);
+    float3 raw = DecodePacked_11_10_11(enc);
     SplatChunkInfo chunk = _SplatChunks[chunkIdx];
     posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
     posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);

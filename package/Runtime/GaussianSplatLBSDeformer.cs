@@ -43,6 +43,11 @@ namespace GaussianSplatting.Runtime
         GaussianSplatRenderer m_Splat;
         GraphicsBuffer m_GpuBoneWeights;
         GraphicsBuffer m_GpuBoneMatrices;
+        // Canonical (un-deformed) splat positions, captured once so that every
+        // frame's LBS pass reads from the original pose instead of the
+        // previous frame's already-deformed m_GpuPosData (which would
+        // otherwise accumulate deformation across frames).
+        GraphicsBuffer m_GpuPosCanonical;
         int m_KernelIndex = -1;
         int m_WeightSplatCount;
         readonly float4x4[] m_BoneMatricesScratch = new float4x4[kBoneCount];
@@ -50,6 +55,7 @@ namespace GaussianSplatting.Runtime
         static class Props
         {
             public static readonly int SplatPos = Shader.PropertyToID("_SplatPos");
+            public static readonly int SplatPosCanonical = Shader.PropertyToID("_SplatPosCanonical");
             public static readonly int SplatChunks = Shader.PropertyToID("_SplatChunks");
             public static readonly int SplatChunkCount = Shader.PropertyToID("_SplatChunkCount");
             public static readonly int SplatFormat = Shader.PropertyToID("_SplatFormat");
@@ -67,7 +73,7 @@ namespace GaussianSplatting.Runtime
 
         public bool HasValidSetup =>
             m_Splat != null && m_Splat.HasValidRenderSetup && m_CSLBSDeform != null &&
-            m_GpuBoneWeights != null && m_WeightSplatCount == m_Splat.splatCount &&
+            m_GpuBoneWeights != null && m_GpuPosCanonical != null && m_WeightSplatCount == m_Splat.splatCount &&
             SystemInfo.supportsComputeShaders;
 
         // Computes an object-space affine matrix for a bone, rotating by
@@ -98,6 +104,8 @@ namespace GaussianSplatting.Runtime
             m_GpuBoneWeights = null;
             m_GpuBoneMatrices?.Dispose();
             m_GpuBoneMatrices = null;
+            m_GpuPosCanonical?.Dispose();
+            m_GpuPosCanonical = null;
             m_WeightSplatCount = 0;
         }
 
@@ -127,6 +135,11 @@ namespace GaussianSplatting.Runtime
                 { name = "GaussianSplatLBSBoneWeights" };
             m_GpuBoneWeights.SetData(json.weights);
             m_WeightSplatCount = m_Splat.splatCount;
+
+            m_GpuPosCanonical?.Dispose();
+            m_GpuPosCanonical = new GraphicsBuffer(m_Splat.m_GpuPosData.target | GraphicsBuffer.Target.CopyDestination,
+                m_Splat.m_GpuPosData.count, m_Splat.m_GpuPosData.stride) { name = "GaussianSplatLBSPosCanonical" };
+            Graphics.CopyBuffer(m_Splat.m_GpuPosData, m_GpuPosCanonical);
 
             if (m_GpuBoneMatrices == null)
             {
@@ -163,6 +176,7 @@ namespace GaussianSplatting.Runtime
 
             ComputeShader cs = m_CSLBSDeform;
             cs.SetBuffer(m_KernelIndex, Props.SplatPos, m_Splat.m_GpuPosData);
+            cs.SetBuffer(m_KernelIndex, Props.SplatPosCanonical, m_GpuPosCanonical);
             cs.SetBuffer(m_KernelIndex, Props.SplatChunks, m_Splat.m_GpuChunks);
             cs.SetInt(Props.SplatChunkCount, m_Splat.m_GpuChunksValid ? m_Splat.m_GpuChunks.count : 0);
             uint format = (uint)m_Splat.asset.posFormat;

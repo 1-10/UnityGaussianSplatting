@@ -15,6 +15,8 @@
 #define GROUP_SIZE 1024
 
 #pragma kernel CSApplyLBS
+#pragma kernel CSApplyExpr
+#pragma kernel CSApplyLBSWithExpr
 
 #include "GaussianSplatting.hlsl"
 // The include above declares (in RWByteAddressBuffer/StructuredBuffer form):
@@ -36,6 +38,16 @@ StructuredBuffer<float4x4> _BoneMatrices; // LBS_BONE_COUNT object-space bone ma
 // writes the deformed result into _SplatPos, so results never accumulate
 // across frames (unlike reading and writing the same live _SplatPos buffer).
 ByteAddressBuffer _SplatPosCanonical;
+
+// Intermediate buffer: decoded (absolute, object-space) float3 positions with
+// FLAME expression blend shapes applied. Written by CSApplyExpr; read by
+// CSApplyLBSWithExpr. Layout: splatCount float3 values, 12 bytes each.
+RWByteAddressBuffer _SplatPosWithExpr;
+
+// FLAME expression blend-shape parameters (used only by CSApplyExpr).
+uint _ExprDim;                          // Number of expression dimensions (K)
+StructuredBuffer<float> _ExprBasis;     // splatCount * K * 3 floats (float3 per splat per dim)
+StructuredBuffer<float> _ExprCoeffs;    // K floats
 
 // Reads the splat's raw stored position value (still 0..1 chunk-normalized
 // for compressed formats, or for Float32 when chunk data is present; a raw
@@ -77,29 +89,12 @@ void LoadSplatPosRawAndBounds(uint idx, uint fmt, out float3 pos, out float3 pos
     }
 }
 
-[numthreads(GROUP_SIZE,1,1)]
-void CSApplyLBS (uint3 id : SV_DispatchThreadID)
+// Applies LBS to `pos` using the per-splat bone weights and matrices, then
+// writes the deformed position back to _SplatPos in the original format.
+void ApplyLBSAndWriteBack(uint idx, float3 pos, float3 posMin, float3 posMax, bool hasChunk, uint fmt)
 {
-    uint idx = id.x;
-    if (idx >= _SplatCount)
-        return;
-
-    // This kernel only knows how to write back Norm11- or Float32-encoded
-    // positions.
-    uint fmt = _SplatFormat & 0xFF;
-    if (fmt != VECTOR_FMT_11 && fmt != VECTOR_FMT_32F)
-        return;
-
-    float3 pos, posMin, posMax;
-    bool hasChunk;
-    LoadSplatPosRawAndBounds(idx, fmt, pos, posMin, posMax, hasChunk);
-    // Norm11 (the only compressed format this kernel supports) always
-    // requires chunk data to decode/encode.
-    if (fmt == VECTOR_FMT_11 && !hasChunk)
-        return;
-
     // Linear blend skinning: blend the bone matrices by the per-splat weights,
-    // then transform the (canonical pose) position by the blended matrix.
+    // then transform the position by the blended matrix.
     float4x4 blended = (float4x4)0;
     [unroll]
     for (uint bone = 0; bone < LBS_BONE_COUNT; bone++)
@@ -134,4 +129,102 @@ void CSApplyLBS (uint3 id : SV_DispatchThreadID)
         uint enc = EncodePacked_11_10_11(norm);
         _SplatPos.Store(idx * 4, enc);
     }
+}
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSApplyLBS (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    // This kernel only knows how to write back Norm11- or Float32-encoded
+    // positions.
+    uint fmt = _SplatFormat & 0xFF;
+    if (fmt != VECTOR_FMT_11 && fmt != VECTOR_FMT_32F)
+        return;
+
+    float3 pos, posMin, posMax;
+    bool hasChunk;
+    LoadSplatPosRawAndBounds(idx, fmt, pos, posMin, posMax, hasChunk);
+    // Norm11 (the only compressed format this kernel supports) always
+    // requires chunk data to decode/encode.
+    if (fmt == VECTOR_FMT_11 && !hasChunk)
+        return;
+
+    ApplyLBSAndWriteBack(idx, pos, posMin, posMax, hasChunk, fmt);
+}
+
+// Applies the FLAME expression blend shapes to the canonical splat positions,
+// writing decoded (absolute, object-space) float3 results to _SplatPosWithExpr.
+// Run this kernel before CSApplyLBSWithExpr when expression coefficients are active.
+[numthreads(GROUP_SIZE,1,1)]
+void CSApplyExpr (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    uint fmt = _SplatFormat & 0xFF;
+    if (fmt != VECTOR_FMT_11 && fmt != VECTOR_FMT_32F)
+        return;
+
+    float3 pos, posMin, posMax;
+    bool hasChunk;
+    LoadSplatPosRawAndBounds(idx, fmt, pos, posMin, posMax, hasChunk);
+    if (fmt == VECTOR_FMT_11 && !hasChunk)
+        return;
+
+    // Accumulate expression offset: sum_k( coeff[k] * exprBasis[idx, k] )
+    float3 offset = (float3)0;
+    uint splatBasisBase = idx * _ExprDim * 3; // hoisted: start of this splat's basis rows
+    for (uint k = 0; k < _ExprDim; k++)
+    {
+        float coeff = _ExprCoeffs[k];
+        uint basisOffset = splatBasisBase + k * 3;
+        float3 basis = float3(_ExprBasis[basisOffset], _ExprBasis[basisOffset + 1], _ExprBasis[basisOffset + 2]);
+        offset += coeff * basis;
+    }
+
+    // Write the expr-offset position as decoded float3 (absolute, object-space).
+    _SplatPosWithExpr.Store3(idx * 12, asuint(pos + offset));
+}
+
+// LBS deformation that reads pre-decoded positions from _SplatPosWithExpr (written
+// by CSApplyExpr) instead of from the canonical buffer. Use this kernel in place of
+// CSApplyLBS when expression blend shapes are active.
+[numthreads(GROUP_SIZE,1,1)]
+void CSApplyLBSWithExpr (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCount)
+        return;
+
+    uint fmt = _SplatFormat & 0xFF;
+    if (fmt != VECTOR_FMT_11 && fmt != VECTOR_FMT_32F)
+        return;
+
+    // Read pre-decoded (absolute, object-space) float3 from the expression-intermediate buffer.
+    float3 pos = asfloat(_SplatPosWithExpr.Load3(idx * 12));
+
+    // Look up chunk bounds — needed for write-back re-encoding.
+    float3 posMin, posMax;
+    bool hasChunk;
+    uint chunkIdx = idx / kChunkSize;
+    hasChunk = chunkIdx < _SplatChunkCount;
+    if (hasChunk)
+    {
+        SplatChunkInfo chunk = _SplatChunks[chunkIdx];
+        posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+        posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+    }
+    else
+    {
+        posMin = posMax = float3(0, 0, 0);
+        // Norm11 always needs chunk bounds for encoding; skip if absent.
+        if (fmt == VECTOR_FMT_11)
+            return;
+    }
+
+    ApplyLBSAndWriteBack(idx, pos, posMin, posMax, hasChunk, fmt);
 }

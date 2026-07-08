@@ -3,9 +3,15 @@
 // positions based on per-splat bone weights and per-bone transform matrices
 // (e.g. driven by FLAME's jaw_pose for mouth animation).
 //
-// Only the Norm11 (11.10.11) splat position format is supported, matching
-// the default GaussianSplatAsset.VectorFormat.Norm11 used by cano_gs.ply
-// assets exported for this project.
+// Supports both the Norm11 (11.10.11) and Float32 splat position formats.
+// Norm11 (and any other compressed format) is chunk-normalized to 0..1 and
+// re-encoded with a saturate(), so deformation is clamped to the splat's
+// original per-chunk bounding box; it is only suitable for small deformations
+// that stay within the canonical mesh's bounds. Float32 positions are
+// recommended for assets driven by GaussianSplatLBSDeformer, since they are
+// written back either as raw (unclamped) world-space values, or as
+// unclamped chunk-relative values when chunk data is present, so deformation
+// is never saturated at the chunk boundary.
 #define GROUP_SIZE 1024
 
 #pragma kernel CSApplyLBS
@@ -31,29 +37,44 @@ StructuredBuffer<float4x4> _BoneMatrices; // LBS_BONE_COUNT object-space bone ma
 // across frames (unlike reading and writing the same live _SplatPos buffer).
 ByteAddressBuffer _SplatPosCanonical;
 
-// Decodes the raw (un-chunked) 0..1 splat position value, along with the
-// chunk bounds it should be de-normalized/re-normalized against. Returns
-// false if the splat has no associated chunk (compressed formats always
-// require chunk data, so this indicates there is nothing valid to decode).
-bool LoadSplatPosRawAndBounds(uint idx, out float3 pos, out float3 posMin, out float3 posMax)
+// Reads the splat's raw stored position value (still 0..1 chunk-normalized
+// for compressed formats, or for Float32 when chunk data is present; a raw
+// absolute position for Float32 when there is no chunk data), along with a
+// flag for whether a chunk was found and its bounds. Returns the decoded
+// (absolute, object-space) position in `pos`.
+void LoadSplatPosRawAndBounds(uint idx, uint fmt, out float3 pos, out float3 posMin, out float3 posMax, out bool hasChunk)
 {
     uint chunkIdx = idx / kChunkSize;
-    if (chunkIdx >= _SplatChunkCount)
+    hasChunk = chunkIdx < _SplatChunkCount;
+
+    float3 raw;
+    if (fmt == VECTOR_FMT_32F)
     {
-        pos = posMin = posMax = float3(0, 0, 0);
-        return false;
+        // Raw, uncompressed 3x float, 12 bytes per splat.
+        raw = asfloat(_SplatPosCanonical.Load3(idx * 12));
+    }
+    else
+    {
+        // Any other (compressed) format supported by this kernel is
+        // Norm11 (VECTOR_FMT_11), a straightforward 4-byte-per-splat raw uint.
+        // CSApplyLBS() only ever calls this with fmt == VECTOR_FMT_11 or
+        // VECTOR_FMT_32F, so this branch is Norm11-only for now.
+        uint enc = _SplatPosCanonical.Load(idx * 4);
+        raw = DecodePacked_11_10_11(enc);
     }
 
-    // Only Norm11 (VECTOR_FMT_11) is supported by this kernel, which is a
-    // straightforward 4-byte-per-splat raw uint, so we can read it directly
-    // from the canonical buffer rather than the live _SplatPos buffer.
-    uint enc = _SplatPosCanonical.Load(idx * 4);
-    float3 raw = DecodePacked_11_10_11(enc);
-    SplatChunkInfo chunk = _SplatChunks[chunkIdx];
-    posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
-    posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
-    pos = lerp(posMin, posMax, raw);
-    return true;
+    if (hasChunk)
+    {
+        SplatChunkInfo chunk = _SplatChunks[chunkIdx];
+        posMin = float3(chunk.posX.x, chunk.posY.x, chunk.posZ.x);
+        posMax = float3(chunk.posX.y, chunk.posY.y, chunk.posZ.y);
+        pos = lerp(posMin, posMax, raw);
+    }
+    else
+    {
+        posMin = posMax = float3(0, 0, 0);
+        pos = raw;
+    }
 }
 
 [numthreads(GROUP_SIZE,1,1)]
@@ -63,13 +84,18 @@ void CSApplyLBS (uint3 id : SV_DispatchThreadID)
     if (idx >= _SplatCount)
         return;
 
-    // This kernel only knows how to write back Norm11-encoded positions.
+    // This kernel only knows how to write back Norm11- or Float32-encoded
+    // positions.
     uint fmt = _SplatFormat & 0xFF;
-    if (fmt != VECTOR_FMT_11)
+    if (fmt != VECTOR_FMT_11 && fmt != VECTOR_FMT_32F)
         return;
 
     float3 pos, posMin, posMax;
-    if (!LoadSplatPosRawAndBounds(idx, pos, posMin, posMax))
+    bool hasChunk;
+    LoadSplatPosRawAndBounds(idx, fmt, pos, posMin, posMax, hasChunk);
+    // Norm11 (the only compressed format this kernel supports) always
+    // requires chunk data to decode/encode.
+    if (fmt == VECTOR_FMT_11 && !hasChunk)
         return;
 
     // Linear blend skinning: blend the bone matrices by the per-splat weights,
@@ -84,9 +110,28 @@ void CSApplyLBS (uint3 id : SV_DispatchThreadID)
 
     float3 newPos = mul(blended, float4(pos, 1)).xyz;
 
-    float3 range = max(posMax - posMin, MIN_RANGE_EPSILON);
-    float3 norm = saturate((newPos - posMin) / range);
+    if (fmt == VECTOR_FMT_32F)
+    {
+        // Float32 has no fixed-point range to clamp to, so write back either
+        // the raw (unclamped) world-space position, or an unclamped
+        // chunk-relative value if chunk data is present. Either way, no
+        // saturate() is applied, so deformation is never clamped to the
+        // splat's original per-chunk bounding box.
+        float3 outPos = newPos;
+        if (hasChunk)
+        {
+            float3 range = max(posMax - posMin, MIN_RANGE_EPSILON);
+            outPos = (newPos - posMin) / range;
+        }
+        uint addr = idx * 12;
+        _SplatPos.Store3(addr, asuint(outPos));
+    }
+    else // VECTOR_FMT_11
+    {
+        float3 range = max(posMax - posMin, MIN_RANGE_EPSILON);
+        float3 norm = saturate((newPos - posMin) / range);
 
-    uint enc = EncodePacked_11_10_11(norm);
-    _SplatPos.Store(idx * 4, enc);
+        uint enc = EncodePacked_11_10_11(norm);
+        _SplatPos.Store(idx * 4, enc);
+    }
 }

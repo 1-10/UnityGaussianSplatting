@@ -279,7 +279,11 @@ namespace GaussianSplatting.Editor
             boundsJob.Schedule().Complete();
 
             EditorUtility.DisplayProgressBar(kProgressTitle, "Morton reordering", 0.05f);
-            ReorderMorton(inputSplats, boundsMin, boundsMax);
+            // Morton reordering only helps chunk-based compression locality; skip it when there
+            // are no chunks so the asset's splat order matches the input file order 1:1 (needed
+            // for external per-splat data such as LBS weights to stay in sync).
+            if (isUsingChunks)
+                ReorderMorton(inputSplats, boundsMin, boundsMax);
 
             // cluster SHs
             NativeArray<int> splatSHIndices = default;

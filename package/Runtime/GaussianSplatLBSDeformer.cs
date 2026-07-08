@@ -11,8 +11,15 @@ namespace GaussianSplatting.Runtime
     // Linear Blend Skinning (LBS), driven by a FLAME-style axis-angle
     // "jaw_pose" and a per-splat bone weight table (root/neck/jaw/leftEye/rightEye).
     //
-    // Requires the target GaussianSplatRenderer to use VectorFormat.Norm11
-    // splat positions (the default format for GaussianSplatAsset).
+    // Requires the target GaussianSplatRenderer to use VectorFormat.Norm11 or
+    // VectorFormat.Float32 splat positions. Norm11 (the default format for
+    // GaussianSplatAsset) re-normalizes deformed positions against the
+    // canonical mesh's per-chunk bounding box and clamps them with a
+    // saturate(), so any deformation that moves a splat outside that box will
+    // visibly clamp/stick at the boundary. VectorFormat.Float32 is
+    // recommended for assets driven by this component (larger asset size is
+    // an acceptable tradeoff for per-avatar head splats), since deformed
+    // positions are written back unclamped.
     [ExecuteInEditMode]
     [RequireComponent(typeof(GaussianSplatRenderer))]
     public class GaussianSplatLBSDeformer : MonoBehaviour
@@ -116,6 +123,15 @@ namespace GaussianSplatting.Runtime
 
             if (m_GpuBoneWeights != null && m_WeightSplatCount == m_Splat.splatCount)
                 return;
+
+            GaussianSplatAsset.VectorFormat posFormat = m_Splat.asset.posFormat;
+            if (posFormat != GaussianSplatAsset.VectorFormat.Norm11 && posFormat != GaussianSplatAsset.VectorFormat.Float32)
+            {
+                Debug.LogError($"GaussianSplatLBSDeformer: unsupported splat position format '{posFormat}'. " +
+                                "Only Norm11 and Float32 are supported (Float32 is recommended to avoid " +
+                                "deformation clamping at the canonical mesh's per-chunk bounds).", this);
+                return;
+            }
 
             m_GpuBoneWeights?.Dispose();
             m_GpuBoneWeights = null;
